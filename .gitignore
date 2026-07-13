@@ -1,0 +1,22 @@
+# API keys / secrets — never commit these
+config.js
+.env
+.env.local
+*apikey*
+*api_key*
+secrets.json
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dependencies (if any build tooling is used)
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*

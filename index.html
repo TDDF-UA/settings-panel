@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>What am I holding?</title>
+<style>
+  :root {
+    --bg: #f3f1ea;
+    --ink: #17171a;
+    --muted: #6b6a63;
+    --accent: #4b3f8f;
+    --accent-ink: #ffffff;
+    --line: #d8d5c9;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 100vh;
+    padding: 2rem 1.5rem;
+    text-align: center;
+  }
+  header { max-width: 480px; }
+  header p {
+    margin: 0.25rem 0 0;
+    color: var(--muted);
+    font-size: 1.05rem;
+  }
+  #status-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    margin-top: 0.75rem;
+  }
+  #dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--line);
+  }
+  #dot.live {
+    background: var(--accent);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    #dot.live { animation: pulse 1.6s ease-in-out infinite; }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.55; transform: scale(1.3); }
+  }
+  #status-text { color: var(--muted); font-size: 1.05rem; }
+
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+  }
+  #guess {
+    font-size: clamp(3rem, 14vw, 7rem);
+    font-weight: 700;
+    line-height: 1.05;
+    max-width: 100%;
+    word-break: break-word;
+  }
+  #confidence {
+    margin-top: 0.75rem;
+    font-size: 1.3rem;
+    color: var(--muted);
+  }
+
+  video {
+    width: 160px;
+    height: 120px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    object-fit: cover;
+    margin-top: 1.5rem;
+  }
+
+  footer {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+    max-width: 420px;
+  }
+  button {
+    flex: 1;
+    min-width: 140px;
+    font-size: 1.15rem;
+    font-weight: 700;
+    padding: 1rem 1.25rem;
+    border-radius: 14px;
+    border: none;
+    cursor: pointer;
+  }
+  #start-btn {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  #start-btn:disabled {
+    background: var(--line);
+    color: var(--muted);
+    cursor: default;
+  }
+  #repeat-btn {
+    background: transparent;
+    color: var(--ink);
+    border: 2px solid var(--line);
+  }
+  button:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+</style>
+</head>
+<body>
+
+  <header>
+    <h1 style="margin:0; font-size:1.4rem;">What am I holding?</h1>
+    <p>Point your camera at the object. It reads the answer out loud.</p>
+    <div id="status-row">
+      <span id="dot" aria-hidden="true"></span>
+      <span id="status-text">Tap start to begin</span>
+    </div>
+  </header>
+
+  <main>
+    <div id="guess" aria-live="polite">—</div>
+    <div id="confidence"></div>
+    <video id="webcam" autoplay playsinline muted aria-label="Camera preview"></video>
+  </main>
+
+  <footer>
+    <button id="start-btn">Start listening</button>
+    <button id="repeat-btn" disabled>Say it again</button>
+  </footer>
+
+  <span id="sr-announce" class="sr-only" aria-live="assertive"></span>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+  <script>
+    // Points at the model.json/weights.bin/metadata.json committed in
+    // this repo's /model folder. (Earlier version of this file pointed
+    // at a hosted Teachable Machine test model instead — swap back to
+    // that if you ever want to try the interface before your own model
+    // is trained.)
+    const MODEL_URL = "./model/";
+
+    const CONFIDENCE_THRESHOLD = 0.75;   // don't announce low-confidence guesses
+    const STABLE_FRAMES_NEEDED = 5;      // require a few consistent frames before speaking
+    const REPEAT_COOLDOWN_MS = 2500;     // don't re-announce the same class too often
+
+    const startBtn = document.getElementById("start-btn");
+    const repeatBtn = document.getElementById("repeat-btn");
+    const guessEl = document.getElementById("guess");
+    const confidenceEl = document.getElementById("confidence");
+    const statusText = document.getElementById("status-text");
+    const dot = document.getElementById("dot");
+    const webcam = document.getElementById("webcam");
+    const srAnnounce = document.getElementById("sr-announce");
+
+    let model, running = false;
+    let candidateClass = null, candidateStreak = 0;
+    let lastSpokenClass = null, lastSpokenAt = 0;
+
+    function speak(text) {
+      if (!("speechSynthesis" in window)) return;
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1;
+      window.speechSynthesis.speak(utter);
+      srAnnounce.textContent = text;
+    }
+
+    async function init() {
+      startBtn.disabled = true;
+      statusText.textContent = "Loading model…";
+
+      model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+
+      // "ideal" (not "exact") so this still works on a laptop with only
+      // one camera — it just falls back gracefully there.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } }
+      });
+      webcam.srcObject = stream;
+      await webcam.play();
+
+      try {
+        if ("wakeLock" in navigator) await navigator.wakeLock.request("screen");
+      } catch (e) { /* not critical if unsupported — screen may just dim on long use */ }
+
+      running = true;
+      dot.classList.add("live");
+      statusText.textContent = "Listening…";
+      repeatBtn.disabled = false;
+      startBtn.textContent = "Restart";
+      startBtn.disabled = false;
+
+      requestAnimationFrame(loop);
+    }
+
+    async function loop() {
+      if (!running) return;
+      const predictions = await model.predict(webcam);
+      predictions.sort((a, b) => b.probability - a.probability);
+      const top = predictions[0];
+
+      guessEl.textContent = top.probability >= CONFIDENCE_THRESHOLD ? top.className : "…";
+      confidenceEl.textContent =
+        top.probability >= CONFIDENCE_THRESHOLD
+          ? Math.round(top.probability * 100) + "% sure"
+          : "Not sure yet — hold it steadier or closer";
+
+      if (top.probability >= CONFIDENCE_THRESHOLD) {
+        if (top.className === candidateClass) {
+          candidateStreak++;
+        } else {
+          candidateClass = top.className;
+          candidateStreak = 1;
+        }
+
+        const now = Date.now();
+        const stableEnough = candidateStreak >= STABLE_FRAMES_NEEDED;
+        const changedOrCooldownPassed =
+          candidateClass !== lastSpokenClass || now - lastSpokenAt > REPEAT_COOLDOWN_MS * 4;
+
+        if (stableEnough && changedOrCooldownPassed) {
+          speak(candidateClass);
+          lastSpokenClass = candidateClass;
+          lastSpokenAt = now;
+          candidateStreak = 0;
+        }
+      } else {
+        candidateClass = null;
+        candidateStreak = 0;
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    startBtn.addEventListener("click", init);
+    repeatBtn.addEventListener("click", () => {
+      if (lastSpokenClass) speak(lastSpokenClass);
+      else if (guessEl.textContent !== "—" && guessEl.textContent !== "…") speak(guessEl.textContent);
+    });
+  </script>
+</body>
+</html>
