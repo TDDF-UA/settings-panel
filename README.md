@@ -2,10 +2,6 @@
 
 > Fundamentals Pipeline assignment — Technology-Driven Design, University of Antwerp
 
-**Student name:**
-**Student ID:**
-**Erasmus student (yes/no):**
-
 ## 1. Component / Challenge Chosen
 <!-- Describe the fundamentals challenge or component this pipeline addresses. What problem does it solve, and why did you pick it? -->
 
